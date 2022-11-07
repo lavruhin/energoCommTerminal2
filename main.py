@@ -1,16 +1,38 @@
-# This is a sample Python script.
-
-# Press Shift+F10 to execute it or replace it with your code.
-# Press Double Shift to search everywhere for classes, files, tool windows, actions, and settings.
-
-
-def print_hi(name):
-    # Use a breakpoint in the code line below to debug your script.
-    print(f'Hi, {name}')  # Press Ctrl+F8 to toggle the breakpoint.
+import socket
+import serial
+import time
 
 
-# Press the green button in the gutter to run the script.
+HOST = "92.124.145.58"
+PORT = 10001
+IS_RECONNECT_ENABLED = True
+
+
+def main():
+    adam = serial.Serial("COM8")
+    is_started = False
+    while IS_RECONNECT_ENABLED or not is_started:
+        is_started = True
+        print("Create client")
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.connect((HOST, PORT))
+            print("Client connected")
+            while True:
+                data_bytes = sock.recv(1024)
+                try:
+                    data_str = data_bytes.decode()
+                    print(f"Received: {data_str}")
+                except UnicodeError:
+                    print("Unicode Error")
+                if data_str == "$03M\r":
+                    sock.send(b"!034017\r")
+                if data_str == "#03\r":
+                    adam.write("#01\r".encode())
+                    time.sleep(0.2)
+                    data = adam.read(adam.in_waiting)
+                    sock.send(data)
+                    print(f"Send: {data.decode()}")
+
+
 if __name__ == '__main__':
-    print_hi('PyCharm')
-
-# See PyCharm help at https://www.jetbrains.com/help/pycharm/
+    main()
