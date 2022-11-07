@@ -23,7 +23,7 @@ def main():
                     data_str = data_bytes.decode()
                     print(f"Received: {data_str}")
                 except UnicodeError:
-                    print("Unicode Error")
+                    print("Unicode Error!")
                 if data_str == "$03M\r":
                     sock.send(b"!034017\r")
                 if data_str == "#03\r":
