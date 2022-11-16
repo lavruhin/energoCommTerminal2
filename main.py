@@ -15,16 +15,19 @@ SERIAL_LIST = ["COM1", "COM2", "COM3", "COM4", "COM5", "COM6",
                "COM7", "COM8", "COM9", "COM10", "COM11", "COM12"]
 adam_data_lock = asyncio.Lock()
 gps_data_lock = asyncio.Lock()
+is_connected = False
 g_adam_data = ""
 g_gps_data = ""
 
 
 async def srv_serial_process(srv_port):
+    global is_connected
     srv = aioserial.aioserial.AioSerial(srv_port)
     while True:
-        srv_request_bytes = await srv.read_until_async(expected=aioserial.CR)
-        srv_request = srv_request_bytes.decode(errors='ignore')
-        print(f"Received from server: {srv_request}")
+        if not is_connected:
+            srv_request_bytes = await srv.read_until_async(expected=aioserial.CR)
+            srv_request = srv_request_bytes.decode(errors='ignore')
+            print(f"Received from server: {srv_request}")
         if srv_request == MEASURER_REQUEST:
             await srv.write_async(MEASURER_ANSWER)
             print(f"Send to server: {MEASURER_ANSWER.decode(errors='ignore')}")
