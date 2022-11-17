@@ -1,6 +1,7 @@
 import asyncio
 import serial
 import aioserial
+import aiofiles
 import pynmeagps
 import time
 
@@ -17,14 +18,15 @@ SERIAL_LIST = ["COM1", "COM2", "COM3", "COM4", "COM5", "COM6",
 adam_data_lock = asyncio.Lock()
 gps_data_lock = asyncio.Lock()
 is_connected_lock = asyncio.Lock()
+file_data_lock = asyncio.Lock()
 srv_lock = asyncio.Lock()
 g_adam_data = ""
 g_gps_data = ""
+g_file_data = ""
 g_is_connected = False
 g_is_synced = False
 g_last_sync_time = time.time()
 srv = None
-file = open("C:\\Users\\Admin\\Desktop\\data.txt", "w")
 
 
 async def srv_serial_ctrl_process(srv_port):
@@ -77,36 +79,49 @@ async def adam_serial_process(adam_port):
     adam = aioserial.aioserial.AioSerial(adam_port)
     while True:
         await adam.write_async(SYNC_REQUEST.encode())
-        await asyncio.sleep(TIMEOUT_ADAM)
+        await asyncio.sleep(TIMEOUT_ADAM * 5)
         adam_data = await adam.read_until_async(expected=aioserial.CR)
         async with adam_data_lock, gps_data_lock:
             global g_adam_data, g_gps_data
             g_adam_data = adam_data
             gps_data = g_gps_data
-        write_data = adam_data[0:-1] + gps_data.encode()
-        # print("ADAM")
-        # global file
-        # file.write(write_data)
-        # print("FILE")
-        await asyncio.sleep(TIMEOUT_ADAM)
+        file_data = adam_data[0:-1].decode() + gps_data + "\n"
+        async with file_data_lock:
+            global g_file_data
+            g_file_data = file_data
+        print("ADAM")
+        # await asyncio.sleep(0.9 - TIMEOUT_ADAM)
 
 
 async def gps_serial_process(gps_port):
     gps_stream = aioserial.aioserial.AioSerial(gps_port)
     gps = pynmeagps.NMEAReader(gps_stream)
     while True:
-        await asyncio.sleep(0.05)
-        raw_data, parsed_data = next(gps)
-        if parsed_data.msgID == "RMC":
-            gps_data = f" {str(parsed_data.date)} " \
-                       f"{str(parsed_data.time)} " \
-                       f"{parsed_data.lat:2.5f} " \
-                       f"{parsed_data.lon:2.5f} " \
-                       f"{parsed_data.spd:3.2f}"
-            print(gps_data)
-            async with gps_data_lock:
-                global g_gps_data
-                g_gps_data = gps_data
+        await asyncio.sleep(0.25)
+        for i in range(5):
+            raw_data, parsed_data = next(gps)
+            if parsed_data.msgID == "RMC":
+                gps_data = f" {str(parsed_data.date)} " \
+                           f"{str(parsed_data.time)} " \
+                           f"{parsed_data.lat:2.5f} " \
+                           f"{parsed_data.lon:2.5f} " \
+                           f"{parsed_data.spd:3.2f}"
+                print(gps_data)
+                async with gps_data_lock:
+                    global g_gps_data
+                    g_gps_data = gps_data
+
+
+async def file_process():
+    async with aiofiles.open("C:\\Users\\Admin\\Desktop\\data.txt", mode="w") as file:
+        while True:
+            start = time.time()
+            async with file_data_lock:
+                global g_file_data
+                file_data = g_file_data
+            await file.write(file_data)
+            print(f"FILE {time.time() - start}")
+            await asyncio.sleep(1.0)
 
 
 def find_serial():
@@ -146,7 +161,8 @@ if __name__ == '__main__':
     tasks = [ioloop.create_task(srv_serial_data_process()),
              ioloop.create_task(srv_serial_ctrl_process(srv_serial_port)),
              ioloop.create_task(adam_serial_process(adam_serial_port)),
-             ioloop.create_task(gps_serial_process(gps_serial_port))]
+             ioloop.create_task(gps_serial_process(gps_serial_port)),
+             ioloop.create_task(file_process())]
     wait_tasks = asyncio.wait(tasks)
     ioloop.run_until_complete(wait_tasks)
     ioloop.close()
