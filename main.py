@@ -1,7 +1,6 @@
 import asyncio
 import serial
 import aioserial
-import aiofiles
 import pynmeagps
 import time
 import threading
@@ -30,18 +29,18 @@ g_is_connected = False
 g_is_synced = False
 g_last_sync_time = time.time()
 srv = None
+srv_data_ready = asyncio.Event()
+srv_is_connected = asyncio.Event()
 adam_data_ready = threading.Event()
 file_data_ready = threading.Event()
-srv_data_ready = threading.Event()
 gps_data_lock = threading.Lock()
 file_data_lock = threading.Lock()
 srv_data_lock = threading.Lock()
-eee = asyncio.Event()
 
 
 async def srv_serial_ctrl_process(srv_port):
     global srv, g_is_connected, g_is_synced, g_last_sync_time
-    srv = aioserial.aioserial.AioSerial(srv_port, timeout=0.5)
+    srv = aioserial.aioserial.AioSerial(srv_port, timeout=5)
     while True:
         async with srv_lock:
             srv_request_bytes = await srv.read_until_async(expected=aioserial.CR)
@@ -66,38 +65,16 @@ async def srv_serial_ctrl_process(srv_port):
             print("SYNC")
 
 
-async def srv_serial_data_process():
-    global srv, g_is_connected, g_is_synced
-    last_data_time = time.time() - 2
-    while True:
-        while time.time() - last_data_time < 4:
-            await asyncio.sleep(1)
-        last_data_time += 4.0
-        if g_is_connected & g_is_synced:
-            print(f"Data {time.time()}")
-            async with adam_data_lock, gps_data_locker:
-                global g_adam_data, g_gps_data
-                adam_data = g_adam_data
-                gps_data = g_gps_data
-            send_data = adam_data[0:-1] + gps_data.encode()
-            async with srv_lock:
-                await srv.write_async(send_data)
-            print(f"Send to server: {send_data.decode(errors='ignore')}")
-
-
 async def srv_data_process():
     global srv, g_is_connected, g_is_synced
     while True:
-        await eee.wait()
-        eee.clear()
-        # srv_data_ready.clear()
-        if g_is_connected & g_is_synced:
-            print(f"Data {time.time()}")
-            with srv_data_lock:
-                srv_data = g_srv_data
-            async with srv_lock:
-                await srv.write_async(srv_data)
-            print(f"Send to server: {srv_data.decode(errors='ignore')}")
+        await srv_data_ready.wait(), srv_is_connected()
+        srv_data_ready.clear()
+        with srv_data_lock:
+            srv_data = g_srv_data
+        async with srv_lock:
+            await srv.write_async(srv_data)
+        print(f"Send to server: {srv_data.decode(errors='ignore')}")
 
 
 def adam_process(adam_port):
@@ -119,13 +96,12 @@ def adam_process(adam_port):
             g_srv_data = srv_data
         print(f"ADAM {time.time()}")
         file_data_ready.set()
-        eee.set()
+        srv_data_ready.set()
 
 
 def gps_process(gps_port):
     gps_stream = serial.Serial(gps_port)
     gps = pynmeagps.NMEAReader(gps_stream)
-    print("Hi")
     while True:
         time.sleep(0.25)
         for i in range(5):
@@ -224,40 +200,59 @@ if __name__ == '__main__':
     # ioloop.run_until_complete(wait_tasks)
     # ioloop.close()
 
-
-async def adam_serial_process(adam_port):
-    adam = aioserial.aioserial.AioSerial(adam_port)
-    while True:
-        await adam.write_async(SYNC_REQUEST.encode())
-        await asyncio.sleep(TIMEOUT_ADAM * 5)
-        adam_data = await adam.read_until_async(expected=aioserial.CR)
-        async with adam_data_lock, gps_data_locker:
-            global g_adam_data, g_gps_data
-            g_adam_data = adam_data
-            gps_data = g_gps_data
-        file_data = adam_data[0:-1].decode() + gps_data + "\n"
-        async with file_data_locker:
-            global g_file_data
-            g_file_data = file_data
-        print("ADAM")
-        # await asyncio.sleep(0.9 - TIMEOUT_ADAM)
-
-
-async def gps_serial_process(gps_port):
-    gps_stream = aioserial.aioserial.AioSerial(gps_port)
-    gps = pynmeagps.NMEAReader(gps_stream)
-    print("Hi")
-    while True:
-        await asyncio.sleep(0.25)
-        for i in range(5):
-            raw_data, parsed_data = next(gps)
-            if parsed_data.msgID == "RMC":
-                gps_data = f" {str(parsed_data.date)} " \
-                           f"{str(parsed_data.time)} " \
-                           f"{parsed_data.lat:2.5f} " \
-                           f"{parsed_data.lon:2.5f} " \
-                           f"{parsed_data.spd:3.2f}"
-                print(gps_data)
-                async with gps_data_locker:
-                    global g_gps_data
-                    g_gps_data = gps_data
+#
+# async def adam_serial_process(adam_port):
+#     adam = aioserial.aioserial.AioSerial(adam_port)
+#     while True:
+#         await adam.write_async(SYNC_REQUEST.encode())
+#         await asyncio.sleep(TIMEOUT_ADAM * 5)
+#         adam_data = await adam.read_until_async(expected=aioserial.CR)
+#         async with adam_data_lock, gps_data_locker:
+#             global g_adam_data, g_gps_data
+#             g_adam_data = adam_data
+#             gps_data = g_gps_data
+#         file_data = adam_data[0:-1].decode() + gps_data + "\n"
+#         async with file_data_locker:
+#             global g_file_data
+#             g_file_data = file_data
+#         print("ADAM")
+#         # await asyncio.sleep(0.9 - TIMEOUT_ADAM)
+#
+#
+# async def gps_serial_process(gps_port):
+#     gps_stream = aioserial.aioserial.AioSerial(gps_port)
+#     gps = pynmeagps.NMEAReader(gps_stream)
+#     print("Hi")
+#     while True:
+#         await asyncio.sleep(0.25)
+#         for i in range(5):
+#             raw_data, parsed_data = next(gps)
+#             if parsed_data.msgID == "RMC":
+#                 gps_data = f" {str(parsed_data.date)} " \
+#                            f"{str(parsed_data.time)} " \
+#                            f"{parsed_data.lat:2.5f} " \
+#                            f"{parsed_data.lon:2.5f} " \
+#                            f"{parsed_data.spd:3.2f}"
+#                 print(gps_data)
+#                 async with gps_data_locker:
+#                     global g_gps_data
+#                     g_gps_data = gps_data
+#
+#
+# async def srv_serial_data_process():
+#     global srv, g_is_connected, g_is_synced
+#     last_data_time = time.time() - 2
+#     while True:
+#         while time.time() - last_data_time < 4:
+#             await asyncio.sleep(1)
+#         last_data_time += 4.0
+#         if g_is_connected & g_is_synced:
+#             print(f"Data {time.time()}")
+#             async with adam_data_lock, gps_data_locker:
+#                 global g_adam_data, g_gps_data
+#                 adam_data = g_adam_data
+#                 gps_data = g_gps_data
+#             send_data = adam_data[0:-1] + gps_data.encode()
+#             async with srv_lock:
+#                 await srv.write_async(send_data)
+#             print(f"Send to server: {send_data.decode(errors='ignore')}")
