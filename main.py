@@ -6,11 +6,12 @@ import time
 import threading
 
 
+echo = False
 MEASURER_REQUEST = "$03M\r"
 MEASURER_ANSWER = b"!034017\r"
 SYNC_REQUEST = "#03\r"
 TIMEOUT_ADAM = 0.2
-TIMEOUT_SRV = 10
+TIMEOUT_SRV = 20
 PERIOD_SRV = 4
 GPS_SERIAL_PORT = "COM9"
 SRV_SERIAL_PORT = "COM1"
@@ -39,42 +40,39 @@ srv_data_lock = threading.Lock()
 
 
 async def srv_serial_ctrl_process(srv_port):
-    global srv, g_is_connected, g_is_synced, g_last_sync_time
-    srv = aioserial.aioserial.AioSerial(srv_port, timeout=5)
+    global srv, g_last_sync_time
+    srv = aioserial.aioserial.AioSerial(srv_port, timeout=0.25)
     while True:
-        async with srv_lock:
-            srv_request_bytes = await srv.read_until_async(expected=aioserial.CR)
+        srv_request_bytes = await srv.read_until_async(expected=aioserial.CR)
         srv_request = srv_request_bytes.decode(errors='ignore')
-        if not srv_request:
-            if (time.time() - g_last_sync_time > TIMEOUT_SRV) & g_is_connected:
-                g_is_connected, g_is_synced = False, False
+        if len(srv_request_bytes) == 0:
+            if time.time() - g_last_sync_time > TIMEOUT_SRV:
                 print("DISCONNECTED")
-            await asyncio.sleep(0.5)
+                srv_is_connected.clear()
+            await asyncio.sleep(0.25)
             continue
         print(f"Received: {srv_request}")
         if srv_request == MEASURER_REQUEST:
-            g_is_connected = True
-            async with srv_lock:
-                await srv.write_async(MEASURER_ANSWER)
+            await srv.write_async(MEASURER_ANSWER)
             print(f"Send to server: {MEASURER_ANSWER.decode(errors='ignore')}")
             print("CONNECTED")
             g_last_sync_time = time.time()
         if srv_request == SYNC_REQUEST:
-            g_is_synced = True
+            srv_is_connected.set()
             g_last_sync_time = time.time()
-            print("SYNC")
 
 
 async def srv_data_process():
-    global srv, g_is_connected, g_is_synced
+    await asyncio.sleep(0.25)
+    global srv
     while True:
-        await srv_data_ready.wait(), srv_is_connected()
-        srv_data_ready.clear()
-        with srv_data_lock:
-            srv_data = g_srv_data
-        async with srv_lock:
+        await asyncio.sleep(0.25)
+        if srv_data_ready.is_set() & srv_is_connected.is_set():
+            srv_data_ready.clear()
+            with srv_data_lock:
+                srv_data = g_srv_data
             await srv.write_async(srv_data)
-        print(f"Send to server: {srv_data.decode(errors='ignore')}")
+            print(f"Send to server: {srv_data.decode(errors='ignore')}")
 
 
 def adam_process(adam_port):
@@ -94,7 +92,8 @@ def adam_process(adam_port):
             global g_file_data, g_srv_data
             g_file_data = file_data
             g_srv_data = srv_data
-        print(f"ADAM {time.time()}")
+        if echo:
+            print(f"ADAM {time.time()}")
         file_data_ready.set()
         srv_data_ready.set()
 
@@ -103,22 +102,25 @@ def gps_process(gps_port):
     gps_stream = serial.Serial(gps_port)
     gps = pynmeagps.NMEAReader(gps_stream)
     while True:
-        time.sleep(0.25)
-        for i in range(5):
+        time.sleep(0.1)
+        for i in range(4):
             raw_data, parsed_data = next(gps)
+            # print(parsed_data)
             if parsed_data.msgID == "RMC":
                 adam_data_ready.set()
                 if parsed_data.time.second % PERIOD_SRV == 0:
                     srv_data_ready.set()
-                gps_data = f" {str(parsed_data.date)} " \
-                           f"{str(parsed_data.time)} " \
-                           f"{parsed_data.lat:2.5f} " \
-                           f"{parsed_data.lon:2.5f} " \
-                           f"{parsed_data.spd:3.2f}"
-                print(gps_data)
-                with gps_data_lock:
-                    global g_gps_data
-                    g_gps_data = gps_data
+                if parsed_data.status == "A":
+                    gps_data = f" {str(parsed_data.date)} " \
+                               f"{str(parsed_data.time)} " \
+                               f"{parsed_data.lat:2.5f} " \
+                               f"{parsed_data.lon:2.5f} " \
+                               f"{parsed_data.spd:3.2f}"
+                    if echo:
+                        print(gps_data)
+                    with gps_data_lock:
+                        global g_gps_data
+                        g_gps_data = gps_data
 
 
 def file_process():
@@ -130,7 +132,8 @@ def file_process():
                 global g_file_data
                 file_data = g_file_data
             file.write(file_data)
-            print(f"FILE {time.time()}")
+            if echo:
+                print(f"FILE {time.time()}")
 
 
 # async def file_process():
