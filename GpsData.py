@@ -1,4 +1,5 @@
 import datetime
+import win32api
 
 
 class GpsData:
@@ -7,6 +8,7 @@ class GpsData:
     lon = 0
     spd = 0
     isEmpty = True
+    isSystemTimeSet = False
 
     @property
     def is_empty(self):
@@ -30,3 +32,16 @@ class GpsData:
 
     def add_second(self):
         self.dt += datetime.timedelta(seconds=1)
+
+    def set_system_time(self):
+        if not self.isSystemTimeSet:
+            t = (self.dt.year, self.dt.month, self.dt.isocalendar()[2],
+                 self.dt.day, self.dt.hour, self.dt.minute, self.dt.second, 0)
+            win32api.SetSystemTime(*t)
+            self.isSystemTimeSet = True
+
+    def get_system_time(self):
+        t = win32api.GetSystemTime()
+        self.dt = datetime.datetime(year=t[0], month=t[1], day=t[3],
+                                    hour=t[4], minute=t[5], second=t[6])
+        return self

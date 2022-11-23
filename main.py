@@ -1,30 +1,33 @@
 import asyncio
 import os.path
-
 import serial
 import aioserial
 import pynmeagps
-import time
 import threading
+import time
 import datetime
 from GpsData import GpsData
+from RepeatTimer import RepeatTimer
 
-# Автоматическое определение портов
-# Синхронизация системного времени по GPS
-# Временные метки без GPS
+# Автоматическое определение порта обмена с сервером
+# Owen-клиент
 
 
-point_number = 3
 isAdam = True
-path = "D:\\Data"
-coefs = {1: [1, 1, 1], 2: [1, 1, 1], 3: [100, 2.5, 1000], 4: [1, 1, 1]}
+useGps = True
+POINT_NUM = 3
+PERIOD_SRV = 3
+PATH = "D:\\Data"
+COEFS = {1: [1, 1, 1],
+         2: [1, 1, 1],
+         3: [100, 2.5, 1000],
+         4: [1, 1, 1]}
 echo_srv_recv, echo_gps, echo_adam, echo_file = False, True, False, False
-MEASURER_REQUEST = "$" + f"{point_number:02}" + "M\r"
-MEASURER_ANSWER = ("!" + f"{point_number:02}" + "4017\r").encode()
-SYNC_REQUEST = "#" + f"{point_number:02}" + "\r"
+MEASURER_REQUEST = "$" + f"{POINT_NUM:02}" + "M\r"
+MEASURER_ANSWER = ("!" + f"{POINT_NUM:02}" + "4017\r").encode()
+SYNC_REQUEST = "#" + f"{POINT_NUM:02}" + "\r"
 TIMEOUT_ADAM = 0.2
 TIMEOUT_SRV = 20
-PERIOD_SRV = 2
 SRV_SERIAL_PORT = "COM1"
 SERIAL_LIST = ["COM1", "COM2", "COM3", "COM4", "COM5", "COM6",
                "COM7", "COM8", "COM9", "COM10", "COM11", "COM12"]
@@ -39,10 +42,13 @@ srv_data_ready = threading.Event()
 srv_is_connected = threading.Event()
 measurer_data_ready = threading.Event()
 file_data_ready = threading.Event()
+last_sys_time = int(time.time())
+global isGpsOk
+isGpsOk = False
 
 
 def srv_process(srv_port):
-    g_last_sync_time = time.time()
+    last_sync_time = time.time()
     srv = serial.Serial(srv_port, timeout=2)
     while True:
         try:
@@ -51,7 +57,7 @@ def srv_process(srv_port):
             continue
         srv_request = srv_request_bytes.decode(errors='ignore')
         if (len(srv_request_bytes) == 0) & srv_is_connected.is_set():
-            if time.time() - g_last_sync_time > TIMEOUT_SRV:
+            if time.time() - last_sync_time > TIMEOUT_SRV:
                 print("DISCONNECTED")
                 srv_is_connected.clear()
             time.sleep(0.25)
@@ -62,10 +68,10 @@ def srv_process(srv_port):
             srv.write(MEASURER_ANSWER)
             print(f"Send to server: {MEASURER_ANSWER.decode(errors='ignore')}")
             print("CONNECTED")
-            g_last_sync_time = time.time()
+            last_sync_time = time.time()
         if srv_request == SYNC_REQUEST:
             srv_is_connected.set()
-            g_last_sync_time = time.time()
+            last_sync_time = time.time()
             srv_data_ready.wait()
             srv_data_ready.clear()
             with srv_data_lock:
@@ -85,13 +91,13 @@ def adam_process(adam_port):
         val = [0, 0, 0]
         for n in range(3):
             try:
-                val[n] = float(adam_data[1 + n * 7:8 + n * 7]) * coefs[point_number][n]
+                val[n] = float(adam_data[1 + n * 7:8 + n * 7]) * COEFS[POINT_NUM][n]
             except ValueError:
                 val[n] = 0
         with gps_data_lock:
             global g_gps_data
             gps_data = g_gps_data
-        file_data = f"{point_number:02}; {gps_data.date_time}{val[0]:04.2f}; " \
+        file_data = f"{POINT_NUM:02}; {gps_data.date_time}{val[0]:04.2f}; " \
                     f"{val[1]:04.2f}; {val[2]:04.2f}; {gps_data.lat_lon_spd}\r"
         srv_data = file_data.encode()
         with file_data_lock, srv_data_lock:
@@ -113,7 +119,12 @@ def gps_process(gps_port):
     while True:
         time.sleep(0.1)
         for i in range(4):
-            raw_data, parsed_data = next(gps)
+            try:
+                raw_data, parsed_data = next(gps)
+            except (StopIteration, serial.serialutil.SerialException):
+                global isGpsOk
+                isGpsOk = False
+                break
             if parsed_data.msgID == "RMC":
                 measurer_data_ready.set()
                 if (parsed_data.status != "A") & (not last_good_gps_data.is_empty):
@@ -123,20 +134,22 @@ def gps_process(gps_port):
                     last_good_gps_data.update(date=parsed_data.date, time=parsed_data.time,
                                               lat=parsed_data.lat, lon=parsed_data.lon,
                                               spd=parsed_data.spd)
+                    last_good_gps_data.set_system_time()
                 if not last_good_gps_data.is_empty:
                     with gps_data_lock:
                         global g_gps_data
                         g_gps_data = last_good_gps_data
                     if echo_gps:
-                        print(last_good_gps_data)
+                        print(last_good_gps_data.date_time + last_good_gps_data.lat_lon_spd)
                 if parsed_data.time.second % PERIOD_SRV == 0:
                     ready_to_sent.set()
+                isGpsOk = True
 
 
 def file_process():
     while True:
         dt = datetime.datetime.now()
-        filename = f"{path}\\{point_number:02}_{dt.year:04}_{dt.month:02}_{dt.day:02}.csv"
+        filename = f"{PATH}\\{POINT_NUM:02}_{dt.year:04}_{dt.month:02}_{dt.day:02}.csv"
         if not os.path.isfile(filename):
             with open(filename, mode="w") as file:
                 file.write("Объект; Дата; Время; Напряжение; Ток-1; Ток-2; Широта; Долгота; Скорость\n")
@@ -168,21 +181,22 @@ def find_serial():
     if adam_serial == "":
         print("Cannot find Adam module")
         exit(-1)
-    for port_test in SERIAL_LIST:
-        try:
-            with serial.Serial(port_test, timeout=1) as gps_test:
-                gps = pynmeagps.NMEAReader(gps_test)
-                try:
-                    if next(gps)[0].decode()[0:2] == "$G":
-                        gps_serial = port_test
-                        break
-                except StopIteration:
-                    continue
-        except serial.SerialException:
-            continue
-    if gps_serial == "":
-        print("Cannot find GPS module")
-        exit(-1)
+    if useGps:
+        for port_test in SERIAL_LIST:
+            try:
+                with serial.Serial(port_test, timeout=1) as gps_test:
+                    gps = pynmeagps.NMEAReader(gps_test)
+                    try:
+                        if next(gps)[0].decode()[0:2] == "$G":
+                            gps_serial = port_test
+                            break
+                    except StopIteration:
+                        continue
+            except serial.SerialException:
+                continue
+        if gps_serial == "":
+            print("Cannot find GPS module")
+            exit(-1)
     # gps_stream = aioserial.aioserial.AioSerial(gps_port)
     # gps = pynmeagps.NMEAReader(gps_stream)
     # while True:
@@ -190,30 +204,47 @@ def find_serial():
     #     raw_data, parsed_data = next(gps)
     #     if parsed_data.msgID == "RMC":
 
-    # gps_serial = GPS_SERIAL_PORT
     srv_serial = SRV_SERIAL_PORT
     print(f"ADAM found at {adam_serial}")
     print(f"GPS found at {gps_serial}")
     return adam_serial, gps_serial, srv_serial
 
 
+def timeout():
+    global last_sys_time
+    if int(time.time()) != last_sys_time:
+        last_sys_time = int(time.time())
+        if not isGpsOk:
+            measurer_data_ready.set()
+            with gps_data_lock:
+                global g_gps_data
+                g_gps_data = GpsData().get_system_time()
+                if g_gps_data.dt.second % PERIOD_SRV == 0:
+                    ready_to_sent.set()
+
+
 async def main():
-    if not os.path.exists(path):
+    if not os.path.exists(PATH):
         try:
-            os.mkdir(path)
+            os.mkdir(PATH)
         except OSError:
             print("Folder cannot be created")
             exit(-1)
+    global isGpsOk
+    isGpsOk = False
     (adam_serial_port, gps_serial_port, srv_serial_port) = find_serial()
-    t1 = threading.Thread(target=gps_process, args=[gps_serial_port])
+    file_thread = threading.Thread(target=file_process)
+    srv_thread = threading.Thread(target=srv_process, args=[srv_serial_port])
+    timer = RepeatTimer(0.1, timeout)
+    if useGps:
+        gps_thread = threading.Thread(target=gps_process, args=[gps_serial_port])
+        gps_thread.start()
     if isAdam:
-        t2 = threading.Thread(target=adam_process, args=[adam_serial_port])
-    t3 = threading.Thread(target=file_process)
-    t4 = threading.Thread(target=srv_process, args=[srv_serial_port])
-    t1.start()
-    t2.start()
-    t3.start()
-    t4.start()
+        adam_thread = threading.Thread(target=adam_process, args=[adam_serial_port])
+        adam_thread.start()
+    file_thread.start()
+    srv_thread.start()
+    timer.start()
     # await asyncio.gather(
     #     asyncio.to_thread(gps_process, gps_serial_port),
     #     asyncio.to_thread(adam_process, adam_serial_port),
