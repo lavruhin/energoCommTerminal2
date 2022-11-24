@@ -2,7 +2,6 @@ import datetime
 import win32api
 
 
-
 class GpsData:
     dt = datetime.datetime.now()
     lat = 0
