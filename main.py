@@ -20,9 +20,9 @@ PERIOD_SRV = 3
 PATH = "D:\\Data"
 COEFS = {1: [1, 1, 1],
          2: [1, 1, 1],
-         3: [100, 2.5, 1000],
+         3: [151.2, 2.5, 1000], #159.2
          4: [1, 1, 1]}
-echo_srv_recv, echo_gps, echo_adam, echo_file = False, True, False, False
+echo_srv_recv, echo_gps, echo_adam, echo_file = True, True, False, False
 MEASURER_REQUEST = "$" + f"{POINT_NUM:02}" + "M\r"
 MEASURER_ANSWER = ("!" + f"{POINT_NUM:02}" + "4017\r").encode()
 SYNC_REQUEST = "#" + f"{POINT_NUM:02}" + "\r"
@@ -30,7 +30,8 @@ TIMEOUT_ADAM = 0.2
 TIMEOUT_SRV = 20
 SRV_SERIAL_PORT = "COM1"
 SERIAL_LIST = ["COM1", "COM2", "COM3", "COM4", "COM5", "COM6",
-               "COM7", "COM8", "COM9", "COM10", "COM11", "COM12"]
+               "COM7", "COM8", "COM9", "COM10", "COM11", "COM12",
+               "COM13", "COM14", "COM15", "COM16"]
 g_gps_data = GpsData()
 g_file_data = ""
 g_srv_data = b""
