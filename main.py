@@ -9,6 +9,7 @@ import datetime
 from GpsData import GpsData
 from RepeatTimer import RepeatTimer
 
+
 # Автоматическое определение порта обмена с сервером
 # Owen-клиент
 
