@@ -10,10 +10,12 @@ import OpenOPC
 from GpsData import GpsData
 from RepeatTimer import RepeatTimer
 from Utils import serial_ports
+from tkinter import *
+from tkinter import ttk
 
 useAdam, useOwen, useGps = False, True, True
 POINT_NUM = 0
-PERIOD_SRV = 3
+PERIOD_SRV = 4
 PATH = "D:\\Data"
 COEFS = {1: [18990, 500, 500],
          2: [19050, 500, 500],
