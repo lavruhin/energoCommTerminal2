@@ -25,6 +25,7 @@ class GpsData:
     def update(self, date, time, lat, lon, spd):
         self.dt = datetime.datetime(year=date.year, month=date.month, day=date.day,
                                     hour=time.hour, minute=time.minute, second=time.second)
+        self.dt += datetime.timedelta(hours=6)
         self.lat = lat
         self.lon = lon
         self.spd = spd
@@ -41,7 +42,7 @@ class GpsData:
             self.isSystemTimeSet = True
 
     def get_system_time(self):
-        t = win32api.GetSystemTime()
+        t = win32api.GetLocalTime()
         self.dt = datetime.datetime(year=t[0], month=t[1], day=t[3],
                                     hour=t[4], minute=t[5], second=t[6])
         return self

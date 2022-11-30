@@ -6,32 +6,30 @@ import pynmeagps
 import threading
 import time
 import datetime
+import OpenOPC
 from GpsData import GpsData
 from RepeatTimer import RepeatTimer
+from Utils import serial_ports
 
-# Автоматическое определение порта обмена с сервером
-# Owen-клиент
-
-
-isAdam = True
-useGps = True
-POINT_NUM = 3
+useAdam, useOwen, useGps = False, True, True
+POINT_NUM = 0
 PERIOD_SRV = 3
 PATH = "D:\\Data"
-COEFS = {1: [1, 1, 1],
-         2: [1, 1, 1],
-         3: [151.2, 2.5, 1000], #159.2
-         4: [1, 1, 1]}
-echo_srv_recv, echo_gps, echo_adam, echo_file = True, True, False, False
+COEFS = {1: [18990, 500, 500],
+         2: [19050, 500, 500],
+         3: [11658, 150, 0],
+         4: [10050, 150, 0]}
+
+echo_srv_recv, echo_gps, echo_adam, echo_file = False, True, False, False
 MEASURER_REQUEST = "$" + f"{POINT_NUM:02}" + "M\r"
 MEASURER_ANSWER = ("!" + f"{POINT_NUM:02}" + "4017\r").encode()
 SYNC_REQUEST = "#" + f"{POINT_NUM:02}" + "\r"
 TIMEOUT_ADAM = 0.2
 TIMEOUT_SRV = 20
-SRV_SERIAL_PORT = "COM1"
-SERIAL_LIST = ["COM1", "COM2", "COM3", "COM4", "COM5", "COM6",
-               "COM7", "COM8", "COM9", "COM10", "COM11", "COM12",
-               "COM13", "COM14", "COM15", "COM16"]
+OWEN_SERIAL_PORT = "COM1"
+OWEN_OPC_TAG1 = "Локомотив.МВ110-8АС.Оперативные параметры.Измеренное значение.Вход 1"
+OWEN_OPC_TAG2 = "Локомотив.МВ110-8АС.Оперативные параметры.Измеренное значение.Вход 2"
+OWEN_OPC_TAG3 = "Локомотив.МВ110-8АС.Оперативные параметры.Измеренное значение.Вход 3"
 g_gps_data = GpsData()
 g_file_data = ""
 g_srv_data = b""
@@ -49,6 +47,9 @@ isGpsOk = False
 
 
 def srv_process(srv_port):
+    MEASURER_REQUEST = "$" + f"{POINT_NUM:02}" + "M\r"
+    MEASURER_ANSWER = ("!" + f"{POINT_NUM:02}" + "4017\r").encode()
+    SYNC_REQUEST = "#" + f"{POINT_NUM:02}" + "\r"
     last_sync_time = time.time()
     srv = serial.Serial(srv_port, timeout=2)
     while True:
@@ -76,12 +77,15 @@ def srv_process(srv_port):
             srv_data_ready.wait()
             srv_data_ready.clear()
             with srv_data_lock:
+                global g_srv_data
                 srv_data = g_srv_data
+                g_srv_data = b""
             srv.write(srv_data)
-            print(f"Send to server: {srv_data.decode(errors='ignore')}")
+            print(f"Send to server:\n{srv_data[0:-1].decode(errors='ignore')}")
 
 
 def adam_process(adam_port):
+    SYNC_REQUEST = "#" + f"{POINT_NUM:02}" + "\r"
     adam = serial.Serial(adam_port)
     while True:
         measurer_data_ready.wait()
@@ -90,23 +94,65 @@ def adam_process(adam_port):
         time.sleep(TIMEOUT_ADAM)
         adam_data = adam.read_until(expected=aioserial.CR)
         val = [0, 0, 0]
-        for n in range(3):
+        if POINT_NUM <= 2:
+            for n in range(3):
+                try:
+                    val[n] = float(adam_data[1 + n * 7:8 + n * 7]) * COEFS[POINT_NUM][n]
+                except ValueError:
+                    val[n] = 0
+        else:
+            for n in range(2):
+                try:
+                    val[n] = float(adam_data[1 + n * 7:8 + n * 7]) * COEFS[POINT_NUM][n]
+                except ValueError:
+                    val[n] = 0
             try:
-                val[n] = float(adam_data[1 + n * 7:8 + n * 7]) * COEFS[POINT_NUM][n]
+                val[2] = (float(adam_data[1 + n * 7:8 + n * 7]) - 0.48) * 2000 / 1.92
+                if val[2] < 0:
+                    val[2] = 0
             except ValueError:
-                val[n] = 0
+                val[2] = 0
         with gps_data_lock:
             global g_gps_data
             gps_data = g_gps_data
-        file_data = f"{POINT_NUM:02}; {gps_data.date_time}{val[0]:04.2f}; " \
-                    f"{val[1]:04.2f}; {val[2]:04.2f}; {gps_data.lat_lon_spd}\r"
+        file_data = f"{POINT_NUM:02}; {gps_data.date_time}{val[0]:01.0f}; " \
+                    f"{val[1]:01.2f}; {val[2]:01.2f}; {gps_data.lat_lon_spd}\n"
         srv_data = file_data.encode()
         with file_data_lock, srv_data_lock:
             global g_file_data, g_srv_data
             g_file_data = file_data
-            g_srv_data = srv_data
+            g_srv_data = g_srv_data + srv_data
         if echo_adam:
             print(f"ADAM {time.time()}")
+        file_data_ready.set()
+        if ready_to_sent.is_set():
+            ready_to_sent.clear()
+            srv_data_ready.set()
+
+
+def owen_process():
+    opc = OpenOPC.client()
+    opc.connect("Owen.OPCNet.DA.1")
+    while True:
+        measurer_data_ready.wait()
+        measurer_data_ready.clear()
+        val = [opc.properties(OWEN_OPC_TAG1, id=2) * COEFS[POINT_NUM][0],
+               opc.properties(OWEN_OPC_TAG2, id=2) * COEFS[POINT_NUM][1],
+               (opc.properties(OWEN_OPC_TAG3, id=2) - 0.48) * 2000 / 1.92]
+        if val[2] < 0:
+            val[2] = 0
+        with gps_data_lock:
+            global g_gps_data
+            gps_data = g_gps_data
+        file_data = f"{POINT_NUM:02}; {gps_data.date_time}{val[0]:01.0f}; " \
+                    f"{val[1]:01.2f}; {val[2]:01.2f}; {gps_data.lat_lon_spd}\n"
+        srv_data = file_data.encode()
+        with file_data_lock, srv_data_lock:
+            global g_file_data, g_srv_data
+            g_file_data = file_data
+            g_srv_data = g_srv_data + srv_data
+        if echo_adam:
+            print(f"OWEN {time.time()}")
         file_data_ready.set()
         if ready_to_sent.is_set():
             ready_to_sent.clear()
@@ -135,13 +181,13 @@ def gps_process(gps_port):
                     last_good_gps_data.update(date=parsed_data.date, time=parsed_data.time,
                                               lat=parsed_data.lat, lon=parsed_data.lon,
                                               spd=parsed_data.spd)
-                    last_good_gps_data.set_system_time()
+                    # last_good_gps_data.set_system_time()
                 if not last_good_gps_data.is_empty:
                     with gps_data_lock:
                         global g_gps_data
                         g_gps_data = last_good_gps_data
                     if echo_gps:
-                        print(last_good_gps_data.date_time + last_good_gps_data.lat_lon_spd)
+                        print(f"GPS: " + last_good_gps_data.date_time + last_good_gps_data.lat_lon_spd)
                 if parsed_data.time.second % PERIOD_SRV == 0:
                     ready_to_sent.set()
                 isGpsOk = True
@@ -153,7 +199,7 @@ def file_process():
         filename = f"{PATH}\\{POINT_NUM:02}_{dt.year:04}_{dt.month:02}_{dt.day:02}.csv"
         if not os.path.isfile(filename):
             with open(filename, mode="w") as file:
-                file.write("Объект; Дата; Время; Напряжение; Ток-1; Ток-2; Широта; Долгота; Скорость\n")
+                file.write("Объект; Дата; Время; Напряжение; Ток-1; Ток-2; Широта; Долгота; Скорость; Расстояние\n")
         with open(filename, mode="a") as file:
             for item in range(10):
                 file_data_ready.wait()
@@ -166,30 +212,44 @@ def file_process():
                     print(f"FILE {time.time()}")
 
 
-def find_serial():
-    adam_serial, gps_serial, srv_serial = "", "", ""
-    for port_test in SERIAL_LIST:
-        try:
-            with serial.Serial(port_test) as adam_test:
-                adam_test.write(MEASURER_REQUEST.encode())
-                time.sleep(TIMEOUT_ADAM)
-                data = adam_test.read(adam_test.in_waiting)
-                if data == MEASURER_ANSWER:
-                    adam_serial = port_test
-                    break
-        except serial.SerialException:
-            continue
-    if adam_serial == "":
-        print("Cannot find Adam module")
-        exit(-1)
-    if useGps:
-        for port_test in SERIAL_LIST:
+def find_serial(use_adam: bool, use_owen: bool, use_gps: bool):
+    MEASURER_REQUEST = "$" + f"{POINT_NUM:02}" + "M\r"
+    MEASURER_ANSWER = ("!" + f"{POINT_NUM:02}" + "4017\r").encode()
+    adam_serial, owen_serial, gps_serial, srv_serial = "", "", "", ""
+    serial_list = serial_ports()
+    if use_adam:
+        for port in serial_list:
             try:
-                with serial.Serial(port_test, timeout=1) as gps_test:
+                with serial.Serial(port) as adam:
+                    adam.write(MEASURER_REQUEST.encode())
+                    time.sleep(TIMEOUT_ADAM)
+                    data = adam.read(adam.in_waiting)
+                    if data == MEASURER_ANSWER:
+                        adam_serial = port
+                        serial_list.remove(port)
+                        print(f"ADAM found at {adam_serial}")
+                        break
+            except serial.SerialException:
+                continue
+        if adam_serial == "":
+            print("Cannot find ADAM module")
+            exit(-1)
+    if use_owen:
+        owen_serial = OWEN_SERIAL_PORT
+        try:
+            serial_list.remove(owen_serial)
+        except ValueError:
+            None
+    if use_gps:
+        for port in serial_list:
+            try:
+                with serial.Serial(port, timeout=1) as gps_test:
                     gps = pynmeagps.NMEAReader(gps_test)
                     try:
                         if next(gps)[0].decode()[0:2] == "$G":
-                            gps_serial = port_test
+                            gps_serial = port
+                            serial_list.remove(port)
+                            print(f"GPS found at {gps_serial}")
                             break
                     except StopIteration:
                         continue
@@ -198,17 +258,9 @@ def find_serial():
         if gps_serial == "":
             print("Cannot find GPS module")
             exit(-1)
-    # gps_stream = aioserial.aioserial.AioSerial(gps_port)
-    # gps = pynmeagps.NMEAReader(gps_stream)
-    # while True:
-    #     await asyncio.sleep(0.01)
-    #     raw_data, parsed_data = next(gps)
-    #     if parsed_data.msgID == "RMC":
-
-    srv_serial = SRV_SERIAL_PORT
-    print(f"ADAM found at {adam_serial}")
-    print(f"GPS found at {gps_serial}")
-    return adam_serial, gps_serial, srv_serial
+    srv_serial = serial_list[-1]
+    print(f"Terminal found at {srv_serial}")
+    return adam_serial, owen_serial, gps_serial, srv_serial
 
 
 def timeout():
@@ -225,6 +277,19 @@ def timeout():
 
 
 async def main():
+    try:
+        with open("d:\\TerminalProgram\\point.ini", "r") as file:
+            global POINT_NUM, useAdam, useOwen, useGps
+            POINT_NUM = int(file.readline())
+            if file.readline()[0:5] == "False":
+                useAdam = False
+            if file.readline()[0:5] == "False":
+                useOwen = False
+            if file.readline()[0:5] == "False":
+                useGps = False
+    except (IOError, ValueError):
+        print("Can't read d:\\TerminalProgram\\point.ini")
+        exit(-1)
     if not os.path.exists(PATH):
         try:
             os.mkdir(PATH)
@@ -233,26 +298,22 @@ async def main():
             exit(-1)
     global isGpsOk
     isGpsOk = False
-    (adam_serial_port, gps_serial_port, srv_serial_port) = find_serial()
+    (adam_serial_port, owen_serial_port, gps_serial_port, srv_serial_port) = find_serial(useAdam, useOwen, useGps)
     file_thread = threading.Thread(target=file_process)
     srv_thread = threading.Thread(target=srv_process, args=[srv_serial_port])
     timer = RepeatTimer(0.1, timeout)
     if useGps:
         gps_thread = threading.Thread(target=gps_process, args=[gps_serial_port])
         gps_thread.start()
-    if isAdam:
+    if useAdam:
         adam_thread = threading.Thread(target=adam_process, args=[adam_serial_port])
         adam_thread.start()
+    else:
+        owen_thread = threading.Thread(target=owen_process)
+        owen_thread.start()
     file_thread.start()
     srv_thread.start()
     timer.start()
-    # await asyncio.gather(
-    #     asyncio.to_thread(gps_process, gps_serial_port),
-    #     asyncio.to_thread(adam_process, adam_serial_port),
-    #     asyncio.to_thread(file_process),
-    #     asyncio.to_thread(srv_serial_ctrl_process(srv_serial_port)),
-    #     srv_data_process()
-    # )
 
 
 if __name__ == '__main__':
