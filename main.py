@@ -13,19 +13,17 @@ from Utils import serial_ports
 from tkinter import *
 from tkinter import ttk
 
+
 useAdam, useOwen, useGps = False, True, True
 POINT_NUM = 0
 PERIOD_SRV = 4
 PATH = "D:\\Data"
-COEFS = {1: [18990, 500, 500],
-         2: [19050, 500, 500],
+COEFS = {1: [18990, 500, 16667],
+         2: [19050, 26543, 43396],
          3: [11658, 150, 0],
          4: [10050, 150, 0]}
 
-echo_srv_recv, echo_gps, echo_adam, echo_file = False, True, False, False
-MEASURER_REQUEST = "$" + f"{POINT_NUM:02}" + "M\r"
-MEASURER_ANSWER = ("!" + f"{POINT_NUM:02}" + "4017\r").encode()
-SYNC_REQUEST = "#" + f"{POINT_NUM:02}" + "\r"
+echo_srv_recv, echo_gps, echo_adam, echo_file = True, True, False, False
 TIMEOUT_ADAM = 0.2
 TIMEOUT_SRV = 20
 OWEN_SERIAL_PORT = "COM1"
@@ -38,6 +36,7 @@ g_srv_data = b""
 gps_data_lock = threading.Lock()
 file_data_lock = threading.Lock()
 srv_data_lock = threading.Lock()
+values_lock = threading.Lock()
 ready_to_sent = threading.Event()
 srv_data_ready = threading.Event()
 srv_is_connected = threading.Event()
@@ -46,6 +45,7 @@ file_data_ready = threading.Event()
 last_sys_time = int(time.time())
 global isGpsOk
 isGpsOk = False
+g_values = [[0, 0, 0], [0, 0, 0], [0, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0, 0]]
 
 
 def srv_process(srv_port):
@@ -53,7 +53,7 @@ def srv_process(srv_port):
     MEASURER_ANSWER = ("!" + f"{POINT_NUM:02}" + "4017\r").encode()
     SYNC_REQUEST = "#" + f"{POINT_NUM:02}" + "\r"
     last_sync_time = time.time()
-    srv = serial.Serial(srv_port, timeout=2)
+    srv = serial.Serial(srv_port, timeout=4)
     while True:
         try:
             srv_request_bytes = srv.read_until(expected=serial.CR)
@@ -73,9 +73,24 @@ def srv_process(srv_port):
             print(f"Send to server: {MEASURER_ANSWER.decode(errors='ignore')}")
             print("CONNECTED")
             last_sync_time = time.time()
-        if srv_request == SYNC_REQUEST:
+        if srv_request[0:3] == SYNC_REQUEST[0:3]:
             srv_is_connected.set()
             last_sync_time = time.time()
+            data = srv_request.split(" ")
+            if len(data) == 22:
+                vals = [[0, 0, 0], [0, 0, 0], [0, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0, 0]]
+                try:
+                    vals[0] = [float(data[1]), float(data[2]), float(data[3])]
+                    vals[1] = [float(data[4]), float(data[5]), float(data[6])]
+                    vals[2] = [float(data[7]), float(data[8]), float(data[9]),
+                               float(data[10]), float(data[11]), float(data[12]), float(data[13])]
+                    vals[3] = [float(data[14]), float(data[15]), float(data[16]),
+                               float(data[17]), float(data[18]), float(data[19]), float(data[20])]
+                    with values_lock:
+                        global g_values
+                        g_values = vals
+                except ValueError:
+                    pass
             srv_data_ready.wait()
             srv_data_ready.clear()
             with srv_data_lock:
@@ -118,7 +133,7 @@ def adam_process(adam_port):
             global g_gps_data
             gps_data = g_gps_data
         file_data = f"{POINT_NUM:02}; {gps_data.date_time}{val[0]:01.0f}; " \
-                    f"{val[1]:01.2f}; {val[2]:01.2f}; {gps_data.lat_lon_spd}\n"
+                    f"{val[1]:01.2f}; {val[2]:01.2f}; {gps_data.lat_lon_spd_dst}\n"
         srv_data = file_data.encode()
         with file_data_lock, srv_data_lock:
             global g_file_data, g_srv_data
@@ -147,7 +162,7 @@ def owen_process():
             global g_gps_data
             gps_data = g_gps_data
         file_data = f"{POINT_NUM:02}; {gps_data.date_time}{val[0]:01.0f}; " \
-                    f"{val[1]:01.2f}; {val[2]:01.2f}; {gps_data.lat_lon_spd}\n"
+                    f"{val[1]:01.2f}; {val[2]:01.2f}; {gps_data.lat_lon_spd_dst}\n"
         srv_data = file_data.encode()
         with file_data_lock, srv_data_lock:
             global g_file_data, g_srv_data
@@ -170,7 +185,7 @@ def gps_process(gps_port):
         for i in range(4):
             try:
                 raw_data, parsed_data = next(gps)
-            except (StopIteration, serial.serialutil.SerialException):
+            except (StopIteration, serial.serialutil.SerialException, pynmeagps.exceptions.NMEAParseError):
                 global isGpsOk
                 isGpsOk = False
                 break
@@ -189,7 +204,7 @@ def gps_process(gps_port):
                         global g_gps_data
                         g_gps_data = last_good_gps_data
                     if echo_gps:
-                        print(f"GPS: " + last_good_gps_data.date_time + last_good_gps_data.lat_lon_spd)
+                        print(f"GPS: " + last_good_gps_data.date_time + last_good_gps_data.lat_lon_spd_dst)
                 if parsed_data.time.second % PERIOD_SRV == 0:
                     ready_to_sent.set()
                 isGpsOk = True
@@ -212,6 +227,66 @@ def file_process():
                 file.write(file_data)
                 if echo_file:
                     print(f"FILE {time.time()}")
+
+
+def gr_process():
+    root = Tk()
+    root.title("Шпагино - Смазнево")
+    frm = ttk.Frame(root, padding=10)
+    frm.grid()
+    labels = [[ttk.Label(frm, text=" ", padding=5),
+               ttk.Label(frm, text=" ", padding=5),
+               ttk.Label(frm, text=" ", padding=5)],
+              [ttk.Label(frm, text="1: Шпагино   ", font=("Consolas", 24), padding=5),
+               ttk.Label(frm, text="2: Смазнево  ", font=("Consolas", 24), padding=5),
+               ttk.Label(frm, text="3: Электровоз", font=("Consolas", 24), padding=5),
+               ttk.Label(frm, text="4: Электровоз", font=("Consolas", 24), padding=5)],
+              [ttk.Label(frm, text=f"{0: 6.0f} В", font=("Consolas", 18), padding=5, foreground="red3"),
+               ttk.Label(frm, text=f"{0: 6.2f} А", font=("Consolas", 18), padding=5, foreground="RoyalBlue4"),
+               ttk.Label(frm, text=f"{0: 8.2f} А", font=("Consolas", 18), padding=5, foreground="dark green"),
+               None, None, None, None],
+              [ttk.Label(frm, text=f"{0: 6.0f} В", font=("Consolas", 18), padding=5, foreground="red3"),
+               ttk.Label(frm, text=f"{0: 6.2f} А", font=("Consolas", 18), padding=5, foreground="RoyalBlue4"),
+               ttk.Label(frm, text=f"{0: 8.2f} А", font=("Consolas", 18), padding=5, foreground="dark green"),
+               None, None, None, None],
+              [ttk.Label(frm, text=f"{0: 6.0f} В", font=("Consolas", 18), padding=5, foreground="red3"),
+               ttk.Label(frm, text=f"{0: 6.2f} А", font=("Consolas", 18), padding=5, foreground="RoyalBlue4"),
+               ttk.Label(frm, text=f"{0: 8.2f} А", font=("Consolas", 18), padding=5, foreground="DeepPink4"),
+               ttk.Label(frm, text=f"{0: 8.0f} км/ч", font=("Consolas", 18), padding=5, foreground="black"),
+               ttk.Label(frm, text=f"{0: 8.2f} км", font=("Consolas", 18), padding=5, foreground="maroon"),
+               ttk.Label(frm, text=f"{0: 12.4f}", font=("Consolas", 12), padding=5, foreground="dark olive green"),
+               ttk.Label(frm, text=f"{0: 12.4f}", font=("Consolas", 12), padding=5, foreground="dark olive green")],
+              [ttk.Label(frm, text=f"{0: 6.0f} В", font=("Consolas", 18), padding=5, foreground="red3"),
+               ttk.Label(frm, text=f"{0: 6.2f} А", font=("Consolas", 18), padding=5, foreground="RoyalBlue4"),
+               ttk.Label(frm, text=f"{0: 8.2f} А", font=("Consolas", 18), padding=5, foreground="DeepPink4"),
+               ttk.Label(frm, text=f"{0: 8.0f} км/ч", font=("Consolas", 18), padding=5, foreground="black"),
+               ttk.Label(frm, text=f"{0: 8.2f} км", font=("Consolas", 18), padding=5, foreground="maroon"),
+               ttk.Label(frm, text=f"{0: 12.4f}", font=("Consolas", 12), padding=5, foreground="dark olive green"),
+               ttk.Label(frm, text=f"{0: 12.4f}", font=("Consolas", 12), padding=5, foreground="dark olive green")]]
+    labels[0][0].grid(column=0, row=2)
+    labels[0][1].grid(column=0, row=5)
+    labels[0][2].grid(column=0, row=8)
+    for n_point in range(4):
+        labels[1][n_point].grid(column=0, row=n_point*3)
+        for n_param in range(7):
+            if labels[n_point + 2][n_param]:
+                labels[n_point + 2][n_param].grid(column=n_param, row=3 * n_point + 1)
+    root.update()
+    while True:
+        time.sleep(1)
+        with values_lock:
+            global g_values
+            vals = g_values
+        for n_point in range(4):
+            labels[n_point + 2][0].configure(text=f"{vals[n_point][0]: 6.0f} В")
+            labels[n_point + 2][1].configure(text=f"{vals[n_point][1]: 6.2f} А")
+            labels[n_point + 2][2].configure(text=f"{vals[n_point][2]: 8.2f} А")
+        for n_point in range(2, 4):
+            labels[n_point + 2][3].configure(text=f"{vals[n_point][3]: 8.0f} км/ч")
+            labels[n_point + 2][4].configure(text=f"{vals[n_point][4]: 8.2f} км")
+            labels[n_point + 2][5].configure(text=f"{vals[n_point][5]: 12.4f}")
+            labels[n_point + 2][6].configure(text=f"{vals[n_point][6]: 12.4f}")
+        root.update()
 
 
 def find_serial(use_adam: bool, use_owen: bool, use_gps: bool):
@@ -303,6 +378,7 @@ async def main():
     (adam_serial_port, owen_serial_port, gps_serial_port, srv_serial_port) = find_serial(useAdam, useOwen, useGps)
     file_thread = threading.Thread(target=file_process)
     srv_thread = threading.Thread(target=srv_process, args=[srv_serial_port])
+    gr_thread = threading.Thread(target=gr_process)
     timer = RepeatTimer(0.1, timeout)
     if useGps:
         gps_thread = threading.Thread(target=gps_process, args=[gps_serial_port])
@@ -315,100 +391,9 @@ async def main():
         owen_thread.start()
     file_thread.start()
     srv_thread.start()
+    gr_thread.start()
     timer.start()
 
 
 if __name__ == '__main__':
     asyncio.run(main())
-    # (adam_serial_port, gps_serial_port, srv_serial_port) = find_serial()
-    # ioloop = asyncio.get_event_loop()
-    # tasks = [ioloop.create_task(srv_serial_data_process()),
-    #          ioloop.create_task(srv_serial_ctrl_process(srv_serial_port)),
-    #          ioloop.create_task(gps_serial_process(gps_serial_port)),
-    #          ioloop.create_task(adam_serial_process(adam_serial_port)),
-    #          ioloop.create_task(file_process())]
-    # wait_tasks = asyncio.wait(tasks)
-    # ioloop.run_until_complete(wait_tasks)
-    # ioloop.close()
-
-#
-# async def adam_serial_process(adam_port):
-#     adam = aioserial.aioserial.AioSerial(adam_port)
-#     while True:
-#         await adam.write_async(SYNC_REQUEST.encode())
-#         await asyncio.sleep(TIMEOUT_ADAM * 5)
-#         adam_data = await adam.read_until_async(expected=aioserial.CR)
-#         async with adam_data_lock, gps_data_locker:
-#             global g_adam_data, g_gps_data
-#             g_adam_data = adam_data
-#             gps_data = g_gps_data
-#         file_data = adam_data[0:-1].decode() + gps_data + "\n"
-#         async with file_data_locker:
-#             global g_file_data
-#             g_file_data = file_data
-#         print("ADAM")
-#         # await asyncio.sleep(0.9 - TIMEOUT_ADAM)
-#
-#
-# async def gps_serial_process(gps_port):
-#     gps_stream = aioserial.aioserial.AioSerial(gps_port)
-#     gps = pynmeagps.NMEAReader(gps_stream)
-#     print("Hi")
-#     while True:
-#         await asyncio.sleep(0.25)
-#         for i in range(5):
-#             raw_data, parsed_data = next(gps)
-#             if parsed_data.msgID == "RMC":
-#                 gps_data = f" {str(parsed_data.date)} " \
-#                            f"{str(parsed_data.time)} " \
-#                            f"{parsed_data.lat:2.5f} " \
-#                            f"{parsed_data.lon:2.5f} " \
-#                            f"{parsed_data.spd:3.2f}"
-#                 print(gps_data)
-#                 async with gps_data_locker:
-#                     global g_gps_data
-#                     g_gps_data = gps_data
-#
-#
-# async def srv_serial_data_process():
-#     global srv, g_is_connected, g_is_synced
-#     last_data_time = time.time() - 2
-#     while True:
-#         while time.time() - last_data_time < 4:
-#             await asyncio.sleep(1)
-#         last_data_time += 4.0
-#         if g_is_connected & g_is_synced:
-#             print(f"Data {time.time()}")
-#             async with adam_data_lock, gps_data_locker:
-#                 global g_adam_data, g_gps_data
-#                 adam_data = g_adam_data
-#                 gps_data = g_gps_data
-#             send_data = adam_data[0:-1] + gps_data.encode()
-#             async with srv_lock:
-#                 await srv.write_async(send_data)
-#             print(f"Send to server: {send_data.decode(errors='ignore')}")
-#
-#
-# async def srv_data_process():
-#     await asyncio.sleep(0.25)
-#     # global srv
-#     while True:
-#         await asyncio.sleep(0.25)
-#         # if srv_data_ready.is_set() & srv_is_connected.is_set():
-#         #     srv_data_ready.clear()
-#         #     with srv_data_lock:
-#         #         srv_data = g_srv_data
-#         #     await srv.write_async(srv_data)
-#         #     print(f"Send to server: {srv_data.decode(errors='ignore')}")
-#
-#
-# async def file_process():
-#     async with aiofiles.open("C:\\Users\\Admin\\Desktop\\data.txt", mode="w") as file:
-#         while True:
-#             start = time.time()
-#             async with file_data_lock:
-#                 global g_file_data
-#                 file_data = g_file_data
-#             await file.write(file_data)
-#             print(f"FILE {time.time() - start}")
-#             await asyncio.sleep(1.0)
